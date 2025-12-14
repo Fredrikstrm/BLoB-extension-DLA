@@ -69,104 +69,96 @@ class BLoBConfig:
 
 def blob_linear_forward(self, x: torch.Tensor, *args: Any, **kwargs: Any):
     previous_dtype = x.dtype
-
     if self.disable_adapters:
         if self.merged:
             self.unmerge()
         result = self.base_layer(x, *args, **kwargs)
+
     elif self.merged:
         result = self.base_layer(x, *args, **kwargs)
+
     else:
         result = self.base_layer(x, *args, **kwargs)
         for active_adapter in self.active_adapters:
-            if active_adapter not in self.lora_A.keys():
+            if active_adapter not in self.lora_A:
                 continue
+
             lora_A = self.lora_A[active_adapter]
             lora_B = self.lora_B[active_adapter]
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
-            x = x.to(lora_A.weight.dtype)
-            result += lora_B(lora_A(dropout(x))) * scaling
 
+            x_d = x.to(lora_A.weight.dtype)
+            result = result + lora_B(lora_A(dropout(x_d))) * scaling
+
+    # BLoB noise term (Bayesian sampling)
     for active_adapter in self.active_adapters:
-        if active_adapter not in self.lora_A.keys():
+        if active_adapter not in self.lora_A:
             continue
+
+        if not getattr(self, "blobsample", False):
+            continue
+
         lora_A = self.lora_A[active_adapter]
-        if self.blobsample:
-            if self.bayes_eps < 0:
-                A_sigma = torch.log1p(torch.exp(self.lora_A_rho[active_adapter]))
-            else:
-                A_sigma = self.lora_A_rho[active_adapter] ** 2
+        dropout = self.lora_dropout[active_adapter]
+        scaling = self.scaling[active_adapter]
 
-            scaling = self.scaling[active_adapter]
-            dropout = self.lora_dropout[active_adapter]
+        x_b = x.to(lora_A.weight.dtype)
 
-            x = x.to(lora_A.weight.dtype)
+        if self.bayes_eps < 0:
+            A_sigma = torch.log1p(torch.exp(self.lora_A_rho[active_adapter]))
+        else:
+            A_sigma = self.lora_A_rho[active_adapter] ** 2
 
-            # Use frozen blob noise
-            if getattr(self, "use_frozen_blob_noise", False) and \
-               hasattr(self, "frozen_r_A") and hasattr(self, "frozen_s_A") and \
-               hasattr(self, "frozen_lora_noise_a"):
-                r_A = self.frozen_r_A
-                s_A = self.frozen_s_A
-                lora_noise_a = self.frozen_lora_noise_a
-            # Generate new blob noise
-            else:
-                if x.dim() == 2:
-                    r_A = (
-                        torch.ones(
-                            (x.size(0), self.in_features), device=x.device, dtype=x.dtype
-                        )
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
-                    s_A = (
-                        torch.ones(
-                            (x.size(0), self.r[active_adapter]),
-                            device=x.device,
-                            dtype=x.dtype,
-                        )
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
+        # Choose frozen vs non-frozen noise 
+        if getattr(self, "use_frozen_blob_noise", False):
+            if getattr(self, "frozen_lora_noise_a", None) is None:
+                self.frozen_lora_noise_a = A_sigma * torch.randn_like(self.lora_A[active_adapter].weight)
+
+            need_init_rs = (getattr(self, "frozen_r_A", None) is None) or (getattr(self, "frozen_s_A", None) is None)
+
+            if not need_init_rs:
+                if x_b.dim() == 2:
+                    need_init_rs = (self.frozen_r_A.shape != (x_b.size(0), self.in_features)) or \
+                                (self.frozen_s_A.shape != (x_b.size(0), self.r[active_adapter]))
                 else:
-                    r_A = (
-                        torch.ones(
-                            (x.size(0), x.size(1), self.in_features),
-                            device=x.device,
-                            dtype=x.dtype,
-                        )
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
-                    s_A = (
-                        torch.ones(
-                            (x.size(0), x.size(1), self.r[active_adapter]),
-                            device=x.device,
-                            dtype=x.dtype,
-                        )
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
-                lora_noise_a = A_sigma * torch.randn_like(
-                self.lora_A[active_adapter].weight
-                )
+                    need_init_rs = (self.frozen_r_A.shape != (x_b.size(0), x_b.size(1), self.in_features)) or \
+                                (self.frozen_s_A.shape != (x_b.size(0), x_b.size(1), self.r[active_adapter]))
 
-                if getattr(self, "use_frozen_blob_noise", False):
-                    self.frozen_r_A = r_A
-                    self.frozen_s_A = s_A
-                    self.frozen_lora_noise_a = lora_noise_a
+            if need_init_rs:
+                if x_b.dim() == 2:
+                    self.frozen_r_A = torch.ones((x_b.size(0), self.in_features), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
+                    self.frozen_s_A = torch.ones((x_b.size(0), self.r[active_adapter]), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
+                else:
+                    self.frozen_r_A = torch.ones((x_b.size(0), x_b.size(1), self.in_features), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
+                    self.frozen_s_A = torch.ones((x_b.size(0), x_b.size(1), self.r[active_adapter]), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
 
-            x = dropout(x)
+            r_A = self.frozen_r_A
+            s_A = self.frozen_s_A
+            lora_noise_a = self.frozen_lora_noise_a
 
-            noise = (((x * r_A) @ lora_noise_a.transpose(0, 1)) * s_A) @ self.lora_B[
-                active_adapter
-            ].weight.transpose(0, 1)
+        else:
+            if x_b.dim() == 2:
+                r_A = torch.ones((x_b.size(0), self.in_features), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
+                s_A = torch.ones((x_b.size(0), self.r[active_adapter]), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
+            else:
+                r_A = torch.ones((x_b.size(0), x_b.size(1), self.in_features), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
+                s_A = torch.ones((x_b.size(0), x_b.size(1), self.r[active_adapter]), device=x_b.device, dtype=x_b.dtype).uniform_(-1, 1).sign()
 
-            result += noise * scaling
+            lora_noise_a = A_sigma * torch.randn_like(self.lora_A[active_adapter].weight)
 
-        result = result.to(previous_dtype)
+        # apply dropout consistently to the BLoB path
+        x_b = dropout(x_b)
 
+        noise = (
+            (((x_b * r_A) @ lora_noise_a.transpose(0, 1)) * s_A)
+            @ self.lora_B[active_adapter].weight.transpose(0, 1)
+        )
+
+        result = result + noise * scaling
+
+    # restore original dtype
+    result = result.to(previous_dtype)
     return result
 
 
@@ -222,49 +214,55 @@ def blob_8bitlinear_forward(self, x: torch.Tensor, *args: Any, **kwargs: Any):
             # ─────────────────────────────────────────────
             # 🔥 OPTION A FIX: freeze blob noise per decode
             # ─────────────────────────────────────────────
-            use_frozen = (
-                getattr(self, "use_frozen_blob_noise", False)
-                and hasattr(self, "frozen_r_A")
-                and hasattr(self, "frozen_s_A")
-                and hasattr(self, "frozen_lora_noise_a")
-            )
+            if getattr(self, "use_frozen_blob_noise", False):
+                # Lazily initialize frozen noise if missing
+                if not hasattr(self, "frozen_lora_noise_a") or self.frozen_lora_noise_a is None:
+                    self.frozen_lora_noise_a = A_sigma * torch.randn_like(
+                        self.lora_A[active_adapter].weight
+                    )
 
-            if use_frozen:
+                    if x.dim() == 2:
+                        self.frozen_r_A = (
+                            torch.ones(
+                                (x.size(0), self.in_features),
+                                device=x.device,
+                                dtype=x.dtype,
+                            )
+                            .uniform_(-1, 1)
+                            .sign()
+                        )
+                        self.frozen_s_A = (
+                            torch.ones(
+                                (x.size(0), self.r[active_adapter]),
+                                device=x.device,
+                                dtype=x.dtype,
+                            )
+                            .uniform_(-1, 1)
+                            .sign()
+                        )
+                    else:
+                        self.frozen_r_A = (
+                            torch.ones(
+                                (x.size(0), x.size(1), self.in_features),
+                                device=x.device,
+                                dtype=x.dtype,
+                            )
+                            .uniform_(-1, 1)
+                            .sign()
+                        )
+                        self.frozen_s_A = (
+                            torch.ones(
+                                (x.size(0), x.size(1), self.r[active_adapter]),
+                                device=x.device,
+                                dtype=x.dtype,
+                            )
+                            .uniform_(-1, 1)
+                            .sign()
+                        )
+
                 r_A = self.frozen_r_A
                 s_A = self.frozen_s_A
                 lora_noise_a = self.frozen_lora_noise_a
-            else:
-                # generate NEW blob noise
-                if x.dim() == 2:
-                    r_A = (
-                        torch.ones((x.size(0), self.in_features), device=x.device, dtype=x.dtype)
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
-                    s_A = (
-                        torch.ones((x.size(0), self.r[active_adapter]), device=x.device, dtype=x.dtype)
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
-                else:
-                    r_A = (
-                        torch.ones((x.size(0), x.size(1), self.in_features), device=x.device, dtype=x.dtype)
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
-                    s_A = (
-                        torch.ones((x.size(0), x.size(1), self.r[active_adapter]), device=x.device, dtype=x.dtype)
-                        .uniform_(-1, 1)
-                        .sign()
-                    )
-
-                lora_noise_a = A_sigma * torch.randn_like(self.lora_A[active_adapter].weight)
-
-                # store frozen noise if enabled
-                if getattr(self, "use_frozen_blob_noise", False):
-                    self.frozen_r_A = r_A
-                    self.frozen_s_A = s_A
-                    self.frozen_lora_noise_a = lora_noise_a
 
             # apply noise
             x = dropout(x)
