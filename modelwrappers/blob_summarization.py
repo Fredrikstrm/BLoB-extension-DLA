@@ -21,7 +21,9 @@ def get_parser() -> ArgumentParser:
     return blob_get_parser()
 
 class BLoBSummarization(BLoB):
-    """BLoB model for Summarization."""
+    """BLoB model for Summarization.
+    Main BLoB extension for this project.  
+    """
 
     def __init__(
         self,
@@ -81,16 +83,6 @@ class BLoBSummarization(BLoB):
         nll_losses = AverageMeter()
         kl_losses = AverageMeter()
         elbo_losses = AverageMeter()
-        samples_seen = 0
-
-        # Debug info
-        # if self.accelerator.is_local_main_process:
-        #     print(
-        #         "[DEBUG] BLoBSummarization.fit:",
-        #         "disable_blob_noise =", getattr(self, "disable_blob_noise", None),
-        #         "klreweighting =", getattr(self, "klreweighting", None),
-        #         "bayes_kllr =", getattr(self.args, "bayes_kllr", None),
-        #     )
             
         # Loss function for seq2seq NLL; ignore padding tokens
         ignore_index = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
@@ -225,7 +217,7 @@ class BLoBSummarization(BLoB):
             label_ids = targets["input_ids"]
 
             with torch.no_grad():
-                # ========== 1) GENERATION FOR ROUGE ==========
+                # Generation for ROUGE
                 if getattr(self.args, "bayes_inference_notsample", False):
                     # deterministic baseline: NO BLoB noise at inference
                     self.sample(self.base_model, False)

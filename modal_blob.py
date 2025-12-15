@@ -139,6 +139,17 @@ def run_blob_dialoguesum_bart_hps():
     os.chdir("/mnt/repo/bayesian-peft")
     subprocess.run(["bash", "scripts/blob/blob-dialoguesum-bart-hps.sh"], check=True)
 
+@app.function(
+    image=image,
+    gpu="A100",
+    timeout=60 * 60 * 12,
+    volumes=VOLUMES,
+    secrets=[wandb_secret],
+)
+def run_blob_dialoguesum_bart_hps2():
+    os.chdir("/mnt/repo/bayesian-peft")
+    subprocess.run(["bash", "scripts/blob/blob-dialoguesum-bart-hps2.sh"], check=True)
+
 
 @app.function(
     image=image,

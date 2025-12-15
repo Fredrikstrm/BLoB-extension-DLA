@@ -4,7 +4,7 @@ modelwrapper=blob_summarization
 eps=0.05
 kllr=0.002
 
-for gamma in 8 12; do
+for gamma in 4 8 12; do
     for beta in 0.1 0.2 0.3; do
         for sample in 10; do
             for seed in 1; do
