@@ -5,7 +5,6 @@ import subprocess
 app = modal.App("bayesian-peft-blob")
 
 repo_volume = modal.Volume.from_name("bayesian-peft-repo", create_if_missing=True)
-
 code_volume = modal.Volume.from_name("bayesian-peft-code", create_if_missing=True)
 ckpt_volume = modal.Volume.from_name("bayesian-peft-models", create_if_missing=True)
 
@@ -42,7 +41,6 @@ image = (
         "numpy",
     )
 ) 
-
 
 @app.local_entrypoint()
 def sync_code():
@@ -86,7 +84,6 @@ def run_blob_roberta_all():
     os.chdir("/mnt/repo/bayesian-peft")
     subprocess.run(["bash", "scripts/blob/blob-roberta-all.sh"], check=True)
 
-
 @app.function(
     image=image,
     gpu="A100",
@@ -98,7 +95,6 @@ def run_blob_roberta_base_all():
     os.chdir("/workspace/workspace/bayesian-peft_20251212_223404")
     subprocess.run(["bash", "scripts/blob/blob-roberta-base-all.sh"], check=True)
 
-
 @app.function(
     image=image,
     gpu="A100",
@@ -109,7 +105,6 @@ def run_blob_roberta_base_all():
 def run_blob_dialoguesum_bart():
     os.chdir("/mnt/repo/bayesian-peft")
     subprocess.run(["bash", "scripts/blob/blob-dialoguesum-bart.sh"], check=True)
-
 
 @app.function(
     image=image,
@@ -250,11 +245,11 @@ def compare_logits():
 @app.function(
     image=image,
     gpu="A100",
-    timeout=60 * 60,
+    timeout=60 * 60 * 12,
     volumes=VOLUMES,
     secrets=[wandb_secret],
 )
-def sample_summaries_blob_gpu_clean(
+def blob_summaries(
     blob_ckpt_dir: str = "/mnt/ckpt/checkpoints/blob_summarization/facebook/bart-base/dialoguesum/blob_summarization-dialoguesum-sample10-eps0.05-kllr0.002-beta0.2-gamma8-seed1",
     split: str = "test",
     num_examples: int = 100,
@@ -264,7 +259,6 @@ def sample_summaries_blob_gpu_clean(
 ):
     import os, sys
     import torch
-    #import matplotlib.pyplot as plt
     from datasets import load_dataset
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     from accelerate import Accelerator
@@ -282,7 +276,6 @@ def sample_summaries_blob_gpu_clean(
 
     split_ds = ds[split]
 
-    # 1) Debug: how many rows vs unique dialogues?
     all_dialogues = split_ds["dialogue"]
 
     # 2) Build indices for unique dialogues (keeps first occurrence of each dialogue)
@@ -407,11 +400,17 @@ def sample_summaries_blob_gpu_clean(
     out_dir = "/mnt/ckpt/blob_mc_samples"
     os.makedirs(out_dir, exist_ok=True)
 
+    existing = {fn for fn in os.listdir(out_dir) if fn.startswith("example_") and fn.endswith(".json")}
+    print(f"[RESUME] found {len(existing)} existing jsons in {out_dir}")
+
     for i, ds_idx in enumerate(unique_indices):
+        out_path = os.path.join(out_dir, f"example_{i:03d}.json")
+        if os.path.exists(out_path):
+            print(f"[RESUME] skipping existing: {out_path}")
+            continue
         ex = split_ds[ds_idx]
         dialogue_id = ex["id"]
         dialogue = ex["dialogue"]
-        gold = ex["summary"]
 
         enc_dbg = tok(
             "Summarize: " + dialogue,
@@ -420,7 +419,6 @@ def sample_summaries_blob_gpu_clean(
             max_length=512,
         ).to(device)
 
-        # compute encoder outputs ONCE per example
         encoder = model.base_model.get_encoder()
         enc_out_dbg = encoder(
             input_ids=enc_dbg["input_ids"],
@@ -446,8 +444,20 @@ def sample_summaries_blob_gpu_clean(
             "samples": samples,
         }
 
-        out_path = os.path.join(out_dir, f"example_{i:03d}.json")
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
         print("[SAVE] wrote:", out_path)
+
+
+@app.function(volumes=VOLUMES)
+def zip_blob_samples():
+    import os
+    import subprocess
+
+    os.chdir("/mnt/ckpt")
+    subprocess.run(
+        ["tar", "-czf", "blob_mc_samples.tar.gz", "blob_mc_samples"],
+        check=True
+    )
+    print("Created blob_mc_samples.tar.gz")
