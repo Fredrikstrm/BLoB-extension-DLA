@@ -6,7 +6,8 @@
 - William Rosengren - wrose@kth.se
 - Yuusuf Dahlstrand - yuusufd@kth.se
 
-This repository is an **extension of the original Bayesian PEFT (BLoB) codebase** by Wang et al. (NeurIPS 2024), adapted and extended as part of a course project.  (Original repository: https://github.com/Wang-ML-Lab/bayesian-peft)
+This repository is an **extension of the original Bayesian PEFT (BLoB) codebase** by Wang et al. (NeurIPS 2024), adapted and extended as part of a course project (Original repository: https://github.com/Wang-ML-Lab/bayesian-peft).
+
 Our work focuses on reproducing, extending, and analyzing Bayesian Low-Rank Adaptation (BLoB) in encoder–decoder architectures and generative tasks, with a particular emphasis on abstractive summarization and uncertainty analysis.
 
 ---
