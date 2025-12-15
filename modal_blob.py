@@ -255,24 +255,22 @@ def compare_logits():
     secrets=[wandb_secret],
 )
 def sample_summaries_blob_gpu_clean(
-    blob_ckpt_dir: str = "/mnt/ckpt/checkpoints/blob_summarization/facebook/bart-base/dialoguesum/blob_summarization-dialoguesum-sample10-eps0.05-kllr0.002-beta0.2-gamma8-seed3",
+    blob_ckpt_dir: str = "/mnt/ckpt/checkpoints/blob_summarization/facebook/bart-base/dialoguesum/blob_summarization-dialoguesum-sample10-eps0.05-kllr0.002-beta0.2-gamma8-seed1",
     split: str = "test",
-    num_examples: int = 1,
-    num_weight_samples: int = 10,
+    num_examples: int = 100,
+    num_weight_samples: int = 100,
     max_new_tokens: int = 128,
     log_dir: str = "/mnt/ckpt/rouge_plots",
 ):
     import os, sys
     import torch
-    import matplotlib.pyplot as plt
+    #import matplotlib.pyplot as plt
     from datasets import load_dataset
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     from accelerate import Accelerator
     from peft import PeftConfig, PeftModel
-    import evaluate
-    import numpy as np 
+    import json, time
 
-    # --- make repo importable ---
     os.chdir("/mnt/repo/bayesian-peft")
     sys.path.insert(0, os.getcwd())
     os.makedirs(log_dir, exist_ok=True)
@@ -281,6 +279,23 @@ def sample_summaries_blob_gpu_clean(
     accelerator = Accelerator()
 
     ds = load_dataset("knkarthick/dialogsum")
+
+    split_ds = ds[split]
+
+    # 1) Debug: how many rows vs unique dialogues?
+    all_dialogues = split_ds["dialogue"]
+
+    # 2) Build indices for unique dialogues (keeps first occurrence of each dialogue)
+    seen = set()
+    unique_indices = []
+    for idx, d in enumerate(all_dialogues):
+        if d in seen:
+            continue
+        seen.add(d)
+        unique_indices.append(idx)
+
+    # 3) Take the first `num_examples` unique dialogues
+    unique_indices = unique_indices[:num_examples]
 
     # load base + tokenizer 
     base = AutoModelForSeq2SeqLM.from_pretrained("facebook/bart-base").to(device)
@@ -356,34 +371,19 @@ def sample_summaries_blob_gpu_clean(
     
     # Force init of frozen noise tensors by doing a forward pass
     @torch.no_grad()
-    def force_init_frozen_noise(enc):
+    def force_init_frozen_noise(enc, enc_out):
         start_id = model.base_model.config.decoder_start_token_id or tok.bos_token_id
         dec_ids = torch.tensor([[start_id]], device=device)
         _ = model.base_model(
-            input_ids=enc["input_ids"],
+            encoder_outputs=enc_out,
             attention_mask=enc["attention_mask"],
             decoder_input_ids=dec_ids,
             use_cache=False,
             return_dict=True,
         )
 
-    # Manual greedy decoder
     @torch.no_grad()
-    def greedy_decode_one_sample(dialogue: str) -> str:
-        enc = tok(
-            "Summarize: " + dialogue,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
-        ).to(device)
-
-        encoder = model.base_model.get_encoder()
-        enc_out = encoder(
-            input_ids=enc["input_ids"],
-            attention_mask=enc["attention_mask"],
-            return_dict=True,
-        )
-
+    def greedy_decode_one_sample(enc, enc_out) -> str:
         start_id = model.base_model.config.decoder_start_token_id or tok.bos_token_id
         dec_ids = torch.tensor([[start_id]], device=device)
 
@@ -397,46 +397,21 @@ def sample_summaries_blob_gpu_clean(
                 use_cache=False,
                 return_dict=True,
             )
-            next_logits = out.logits[:, -1, :]
-            next_id = torch.argmax(next_logits, dim=-1, keepdim=True)
+            next_id = torch.argmax(out.logits[:, -1, :], dim=-1, keepdim=True)
             dec_ids = torch.cat([dec_ids, next_id], dim=1)
             if eos_id is not None and int(next_id.item()) == int(eos_id):
                 break
 
-        gen = dec_ids[:, 1:]
-        return tok.decode(gen[0], skip_special_tokens=True).strip()
-    
-    rouge = evaluate.load("rouge")
-    rouge_keys = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
+        return tok.decode(dec_ids[0, 1:], skip_special_tokens=True).strip()
 
-    def rouge_one(pred: str, ref: str) -> dict:
-        # evaluate returns floats in [0,1] by default
-        scores = rouge.compute(predictions=[pred], references=[ref], use_stemmer=True)
-        return {k: float(scores.get(k, 0.0)) for k in rouge_keys}
+    out_dir = "/mnt/ckpt/blob_mc_samples"
+    os.makedirs(out_dir, exist_ok=True)
 
-    def plot_rouge_vs_sample(sample_scores: list[dict], ex_idx: int):
-        xs = np.arange(1, len(sample_scores) + 1)
-        for k in rouge_keys:
-            ys = np.array([d[k] for d in sample_scores], dtype=float)
-            plt.figure()
-            plt.plot(xs, ys, marker="o")
-            plt.xlabel("Sample index")
-            plt.ylabel(k)
-            plt.title(f"Example {ex_idx} | {k} vs sample")
-            outpath = os.path.join(log_dir, f"rouge_example{ex_idx}_{k}.png")
-            plt.savefig(outpath, dpi=200, bbox_inches="tight")
-            plt.close()
-            print("[PLOT] saved:", outpath)
-
-    # Run examples
-    for i in range(num_examples):
-        ex = ds[split][i]
+    for i, ds_idx in enumerate(unique_indices):
+        ex = split_ds[ds_idx]
+        dialogue_id = ex["id"]
         dialogue = ex["dialogue"]
         gold = ex["summary"]
-
-        print("\n" + "=" * 80)
-        print(f"Example {i} | split={split}")
-        print("GOLD:", gold)
 
         enc_dbg = tok(
             "Summarize: " + dialogue,
@@ -445,43 +420,34 @@ def sample_summaries_blob_gpu_clean(
             max_length=512,
         ).to(device)
 
-        # prove sampling affects logits (A vs B) 
-        # freeze_blob_noise(model.base_model, True)
-        # force_init_frozen_noise(enc_dbg)
-        # freeze_blob_noise(model.base_model, False)
+        # compute encoder outputs ONCE per example
+        encoder = model.base_model.get_encoder()
+        enc_out_dbg = encoder(
+            input_ids=enc_dbg["input_ids"],
+            attention_mask=enc_dbg["attention_mask"],
+            return_dict=True,
+        )
 
-        # freeze_blob_noise(model.base_model, True)
-        # force_init_frozen_noise(enc_dbg)
-        # freeze_blob_noise(model.base_model, False)
-
-        # actual summary samples 
-
-        sample_texts = []
-        sample_scores = []
-
+        samples = []
         for s in range(num_weight_samples):
             freeze_blob_noise(model.base_model, True)
-            force_init_frozen_noise(enc_dbg)
+            force_init_frozen_noise(enc_dbg, enc_out_dbg)
 
-            # grab one frozen noise norm (after init)
-            for m in model.base_model.modules():
-                t = getattr(m, "frozen_lora_noise_a", None)
-                if t is not None:
-                    break
-
-            pred = greedy_decode_one_sample(dialogue)
-            scores = rouge_one(pred, gold)
-            sample_texts.append(pred)
-            sample_scores.append(scores)
+            pred = greedy_decode_one_sample(enc_dbg, enc_out_dbg)
 
             freeze_blob_noise(model.base_model, False)
 
-            print(f"\n[BLoB weight-sample {s+1}/{num_weight_samples}] {pred}")
-            print("ROUGE:", scores)
+            samples.append(pred)
 
-        print("\n--- ROUGE summary over samples ---")
-        for k in rouge_keys:
-            vals = np.array([d[k] for d in sample_scores], dtype=float)
-            print(f"{k}: mean={vals.mean():.4f} var={vals.var(ddof=0):.6f} min={vals.min():.4f} max={vals.max():.4f}")
+        payload = {
+            "example_index": i,
+            "dataset_index": int(ds_idx),    
+            "dialogue_id": dialogue_id,
+            "samples": samples,
+        }
 
-        plot_rouge_vs_sample(sample_scores, ex_idx=i)
+        out_path = os.path.join(out_dir, f"example_{i:03d}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+
+        print("[SAVE] wrote:", out_path)
