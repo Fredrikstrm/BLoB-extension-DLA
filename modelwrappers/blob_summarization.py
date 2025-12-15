@@ -55,18 +55,15 @@ class BLoBSummarization(BLoB):
 
         input_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
-        label_ids = targets["input_ids"]  # keep for reference, but don't pass to model
+        label_ids = targets["input_ids"] 
 
         if not sample:
-            #self.sample(self.base_model, False) 
-            # Don't pass labels - just get logits
             outputs = self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                labels=label_ids,  # Use decoder_input_ids instead
+                labels=label_ids,  
             )
             logits = outputs.logits
-            #self.sample(self.base_model, True) 
             return logits.unsqueeze(1)
 
         # Bayesian sampling
@@ -75,7 +72,7 @@ class BLoBSummarization(BLoB):
             outputs = self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                labels=label_ids,  # Use decoder_input_ids instead
+                labels=label_ids, 
             )
             logits_list.append(outputs.logits)
         return torch.stack(logits_list, dim=1)
@@ -84,17 +81,16 @@ class BLoBSummarization(BLoB):
         nll_losses = AverageMeter()
         kl_losses = AverageMeter()
         elbo_losses = AverageMeter()
-        # accs = AverageMeter() # Not using accuracy for summarization
         samples_seen = 0
 
         # Debug info
-        if self.accelerator.is_local_main_process:
-            print(
-                "[DEBUG] BLoBSummarization.fit:",
-                "disable_blob_noise =", getattr(self, "disable_blob_noise", None),
-                "klreweighting =", getattr(self, "klreweighting", None),
-                "bayes_kllr =", getattr(self.args, "bayes_kllr", None),
-            )
+        # if self.accelerator.is_local_main_process:
+        #     print(
+        #         "[DEBUG] BLoBSummarization.fit:",
+        #         "disable_blob_noise =", getattr(self, "disable_blob_noise", None),
+        #         "klreweighting =", getattr(self, "klreweighting", None),
+        #         "bayes_kllr =", getattr(self.args, "bayes_kllr", None),
+        #     )
             
         # Loss function for seq2seq NLL; ignore padding tokens
         ignore_index = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
@@ -127,7 +123,6 @@ class BLoBSummarization(BLoB):
                 logits = logits_stacked.mean(1) 
                 
                 # Compute NLL loss
-                # Flatten logits and labels: logits (B*T, V), labels (B*T)
                 label_ids = targets["input_ids"]
                 nll = loss_fct(
                     logits.view(-1, logits.size(-1)),
@@ -176,8 +171,6 @@ class BLoBSummarization(BLoB):
                 )
 
                 # Logging
-                # references = self.accelerator.gather(labels) # Not strictly needed for loss logging unless we want exact count
-                # Just use batch size
                 len_batch = label_ids.shape[0]
                 
                 kl_losses.update(kl, len_batch)
@@ -207,13 +200,12 @@ class BLoBSummarization(BLoB):
         self.eval()
         status = self.training
 
-        # --- NEW: NLL setup ---
+        # NLL setup 
         ignore_index = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
         loss_fct = nn.CrossEntropyLoss(ignore_index=ignore_index)
 
         total_nll = 0.0
         total_tokens = 0
-        # -----------------------
 
         # Metrics
         rouge_sums = {"rouge1": 0.0, "rouge2": 0.0, "rougeL": 0.0}
@@ -223,7 +215,6 @@ class BLoBSummarization(BLoB):
             if self.args.dataset_type != "oedataset":
                 continue
 
-            # Eval loader from LMDataset.s2s_collate_fn returns (inputs, targets, None)
             if len(batch) == 2:
                 prompts, targets = batch
             else:
@@ -246,14 +237,12 @@ class BLoBSummarization(BLoB):
                         num_beams=1,
                     )
 
-                    # re-enable sampling state for training later
                     self.sample(self.base_model, True)
 
-                    # single set of generated ids
                     all_generated_ids = [generated_ids]
 
                 else:
-                    # Bayesian decoding: one weight sample per decode
+                    # Bayesian decoding, one weight sample per decode
                     summaries_per_batch = []
                     n_weight_samples = getattr(
                         self.args, "bayes_eval_n_samples_final", 1
@@ -276,11 +265,8 @@ class BLoBSummarization(BLoB):
                         summaries_per_batch.append(generated_ids)
 
                     all_generated_ids = summaries_per_batch  # list of tensors
-                # =============================================
 
-                # ========== 2) NLL UNDER POSTERIOR PREDICTIVE ==========
-                # Use same pattern as training: multiple weight samples → average logits
-                # For LoRA (disable_blob_noise=True), this degenerates to 1 sample.
+
                 n_eval_samples = getattr(self.args, "bayes_eval_n_samples_final", 1)
                 if getattr(self, "disable_blob_noise", False):
                     n_eval_samples = 1  # deterministic LoRA
@@ -289,16 +275,16 @@ class BLoBSummarization(BLoB):
                     (prompts, targets),
                     sample=True,
                     n_samples=n_eval_samples,
-                )  # [B, S, T, V]
+                ) 
 
-                # average over samples → posterior predictive logits
-                logits = logits_stacked.mean(1)  # [B, T, V]
+                # average over samples
+                logits = logits_stacked.mean(1)  
 
                 # compute batch NLL (per token, padding ignored)
                 batch_loss = loss_fct(
                     logits.view(-1, logits.size(-1)),
                     label_ids.view(-1),
-                )  # scalar (mean over non-pad tokens)
+                ) 
 
                 # number of *non-pad* tokens in this batch
                 token_mask = (label_ids != ignore_index)
@@ -306,9 +292,8 @@ class BLoBSummarization(BLoB):
 
                 total_nll += batch_loss.item() * num_tokens  # undo mean
                 total_tokens += num_tokens
-                # ======================================================
 
-            # ========== 3) ROUGE (averaged over samples) ==========
+
             decoded_labels = self.tokenizer.batch_decode(
                 label_ids, skip_special_tokens=True
             )
@@ -335,7 +320,6 @@ class BLoBSummarization(BLoB):
             for key in rouge_sums:
                 rouge_sums[key] += batch_rouges[key]
             n_batches += 1
-            # ======================================================
 
         # Average ROUGE
         if n_batches > 0:
@@ -363,5 +347,5 @@ class BLoBSummarization(BLoB):
             rouge_sums["rouge1"],
             rouge_sums["rouge2"],
             rouge_sums["rougeL"],
-            avg_nll,  # now real NLL instead of 0.0
+            avg_nll,
         )

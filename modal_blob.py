@@ -38,6 +38,8 @@ image = (
         "scikit-learn",
         "ipdb",
         "safetensors",
+        "matplotlib",
+        "numpy",
     )
 ) 
 
@@ -258,17 +260,22 @@ def sample_summaries_blob_gpu_clean(
     num_examples: int = 1,
     num_weight_samples: int = 10,
     max_new_tokens: int = 128,
+    log_dir: str = "/mnt/ckpt/rouge_plots",
 ):
     import os, sys
     import torch
+    import matplotlib.pyplot as plt
     from datasets import load_dataset
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     from accelerate import Accelerator
     from peft import PeftConfig, PeftModel
+    import evaluate
+    import numpy as np 
 
     # --- make repo importable ---
     os.chdir("/mnt/repo/bayesian-peft")
     sys.path.insert(0, os.getcwd())
+    os.makedirs(log_dir, exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     accelerator = Accelerator()
@@ -398,6 +405,28 @@ def sample_summaries_blob_gpu_clean(
 
         gen = dec_ids[:, 1:]
         return tok.decode(gen[0], skip_special_tokens=True).strip()
+    
+    rouge = evaluate.load("rouge")
+    rouge_keys = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
+
+    def rouge_one(pred: str, ref: str) -> dict:
+        # evaluate returns floats in [0,1] by default
+        scores = rouge.compute(predictions=[pred], references=[ref], use_stemmer=True)
+        return {k: float(scores.get(k, 0.0)) for k in rouge_keys}
+
+    def plot_rouge_vs_sample(sample_scores: list[dict], ex_idx: int):
+        xs = np.arange(1, len(sample_scores) + 1)
+        for k in rouge_keys:
+            ys = np.array([d[k] for d in sample_scores], dtype=float)
+            plt.figure()
+            plt.plot(xs, ys, marker="o")
+            plt.xlabel("Sample index")
+            plt.ylabel(k)
+            plt.title(f"Example {ex_idx} | {k} vs sample")
+            outpath = os.path.join(log_dir, f"rouge_example{ex_idx}_{k}.png")
+            plt.savefig(outpath, dpi=200, bbox_inches="tight")
+            plt.close()
+            print("[PLOT] saved:", outpath)
 
     # Run examples
     for i in range(num_examples):
@@ -415,22 +444,23 @@ def sample_summaries_blob_gpu_clean(
             truncation=True,
             max_length=512,
         ).to(device)
-        start_id = model.base_model.config.decoder_start_token_id or tok.bos_token_id
 
         # prove sampling affects logits (A vs B) 
-        freeze_blob_noise(model.base_model, True)
-        force_init_frozen_noise(enc_dbg)
-        freeze_blob_noise(model.base_model, False)
+        # freeze_blob_noise(model.base_model, True)
+        # force_init_frozen_noise(enc_dbg)
+        # freeze_blob_noise(model.base_model, False)
 
-        freeze_blob_noise(model.base_model, True)
-        force_init_frozen_noise(enc_dbg)
-        freeze_blob_noise(model.base_model, False)
+        # freeze_blob_noise(model.base_model, True)
+        # force_init_frozen_noise(enc_dbg)
+        # freeze_blob_noise(model.base_model, False)
 
         # actual summary samples 
+
+        sample_texts = []
+        sample_scores = []
+
         for s in range(num_weight_samples):
             freeze_blob_noise(model.base_model, True)
-
-            # force init before printing sig so it won't be None just because no forward happened
             force_init_frozen_noise(enc_dbg)
 
             # grab one frozen noise norm (after init)
@@ -439,8 +469,19 @@ def sample_summaries_blob_gpu_clean(
                 if t is not None:
                     break
 
-            txt = greedy_decode_one_sample(dialogue)
+            pred = greedy_decode_one_sample(dialogue)
+            scores = rouge_one(pred, gold)
+            sample_texts.append(pred)
+            sample_scores.append(scores)
 
             freeze_blob_noise(model.base_model, False)
 
-            print(f"\n[BLoB weight-sample {s+1}/{num_weight_samples}] {txt}")
+            print(f"\n[BLoB weight-sample {s+1}/{num_weight_samples}] {pred}")
+            print("ROUGE:", scores)
+
+        print("\n--- ROUGE summary over samples ---")
+        for k in rouge_keys:
+            vals = np.array([d[k] for d in sample_scores], dtype=float)
+            print(f"{k}: mean={vals.mean():.4f} var={vals.var(ddof=0):.6f} min={vals.min():.4f} max={vals.max():.4f}")
+
+        plot_rouge_vs_sample(sample_scores, ex_idx=i)
