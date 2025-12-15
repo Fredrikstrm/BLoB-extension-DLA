@@ -80,6 +80,7 @@ class BLoBSummarization(BLoB):
         return torch.stack(logits_list, dim=1)
 
     def fit(self, train_loader, eval_loader):
+        """fit method for BLoB summarization model. Differs from base BLoB in loss computation and seq2seq handling."""
         nll_losses = AverageMeter()
         kl_losses = AverageMeter()
         elbo_losses = AverageMeter()
@@ -188,6 +189,7 @@ class BLoBSummarization(BLoB):
                     self.evaluate(eval_loader)
 
     def evaluate(self, eval_loader):
+        """Evaluate on summarization dataset using ROUGE and NLL."""
         print("Evaluating...")
         self.eval()
         status = self.training

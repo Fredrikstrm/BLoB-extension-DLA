@@ -141,27 +141,13 @@ def run_blob_dialoguesum_bart_hps():
 
 @app.function(
     image=image,
-    gpu="A100",
-    timeout=60 * 60 * 12,
-    volumes=VOLUMES,
-    secrets=[wandb_secret],
-)
-def run_blob_dialoguesum_bart_hps2():
-    os.chdir("/mnt/repo/bayesian-peft")
-    subprocess.run(["bash", "scripts/blob/blob-dialoguesum-bart-hps2.sh"], check=True)
-
-
-@app.function(
-    image=image,
     gpu="A100",                
     timeout=60 * 60 * 12,
     volumes=VOLUMES,
     secrets=[wandb_secret],  
 )
 def lora_dialoguesum_summarization():
-
     os.chdir("/mnt/repo/bayesian-peft")
-
     subprocess.run(["bash", "scripts/lora/lora-summarization.sh"], check=True)
 
 @app.function( 
@@ -268,13 +254,14 @@ def blob_summaries(
     max_new_tokens: int = 128,
     log_dir: str = "/mnt/ckpt/rouge_plots",
 ):
+    """Compute multiple summaries per dialogue using BLoB model with weight sampling."""
     import os, sys
     import torch
     from datasets import load_dataset
     from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
     from accelerate import Accelerator
     from peft import PeftConfig, PeftModel
-    import json, time
+    import json
 
     os.chdir("/mnt/repo/bayesian-peft")
     sys.path.insert(0, os.getcwd())

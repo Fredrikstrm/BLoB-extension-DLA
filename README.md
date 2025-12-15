@@ -72,6 +72,8 @@ This project extends BLoB beyond its original scope in the following ways:
 ├── modal_blob.py               # NEW: GPU sampling + MC inference
 ├── scripts/
 │   ├── blob/                   # extended (BART scripts)
+├── utils/
+│   ├── args.py                 # extended (added new arguments for generative compatibility)
 ├── blob_mc_samples/            # generated MC summaries (JSON)
 └── README.md                   # this file
 ```
