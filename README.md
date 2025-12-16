@@ -75,6 +75,8 @@ This project extends BLoB beyond its original scope in the following ways:
 │   ├── blob/                   # extended (BART scripts)
 ├── utils/
 │   ├── args.py                 # extended (added new arguments for generative compatibility)
+├── generative_experiments/
+│   ├── BLoB_vs_LoRA.ipynb      # BLoB vs LoRA experiment on 100 dialogue and 100 generations per dialogue (100x100)
 ├── blob_mc_samples/            # generated MC summaries (JSON)
 └── README.md                   # this file
 ```
